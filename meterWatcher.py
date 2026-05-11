@@ -10,6 +10,8 @@ Use pyInstaller to make into a sharable exe:
 
 # https://www.codingdojo.com/blog/what-is-web-scraping#:~:text=Also%20known%20as%20web%20data,job%20more%20quickly%20and%20efficiently.
 import re 
+import werkzeug
+werkzeug.cached_property = werkzeug.utils.cached_property
 from robobrowser import RoboBrowser
 DEBUG_MODE = False
 import send_email
