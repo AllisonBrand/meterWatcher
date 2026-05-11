@@ -1,0 +1,11 @@
+# This file stores the passcodes, so DON't upload to GitHub
+env_vars
+
+meterWatcher.spec
+
+# Directories to exclude
+__pycache__/
+build/
+dist/
+Old Versions and Testing/
+# The old versions have passwords and such scattered throughout.
