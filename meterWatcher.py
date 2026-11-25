@@ -10,9 +10,9 @@ Use pyInstaller to make into a sharable exe:
 
 # https://www.codingdojo.com/blog/what-is-web-scraping#:~:text=Also%20known%20as%20web%20data,job%20more%20quickly%20and%20efficiently.
 import re 
-import werkzeug
-werkzeug.cached_property = werkzeug.utils.cached_property
-from robobrowser import RoboBrowser
+from urllib.parse import urljoin
+from playwright.sync_api import sync_playwright, Page # conda install -c conda-forge playwright-python
+
 DEBUG_MODE = False
 import send_email
 send_email.DEBUG_MODE = DEBUG_MODE
@@ -21,55 +21,53 @@ from env_vars import EMAIL, PASSWORD, RECEIVE_EMAIL # KMPUD Login, and address t
 # For Debugging
 # import json
 
-def _get_meter_data() -> tuple:
+LOGIN_URL = 'https://www.kmpud.com/login/'
+METER_URL = 'https://www.kmpud.com/my-account/meter-information/'
+
+def _get_meter_data(page: Page) -> dict:
     ''' After program has already logged in, this function locates and returns the month's data for every meter type available on the kmpud utility website.
         ex: ('Water', 'Electric', 'Propane')
-        Uses global variable browser, an instance of RoboBrowser
+        page: the logged-in Playwright Page
 
-        Returns (dates_list, 
-                 meter_data_dict),
-        Where the dict is of the form: 
-                 {'Meter Type': {'Unit': unit,
-                                 'Data': list of usage data}
-                 } for every meter type.
+        Returns a dict of the form:
+        {'Meter Type': {'Unit': unit,
+                        'Data': list of usage data,
+                        'Dates': list of dates}
+        } for every meter type.
     '''
-    global browser
-
-    # First navigates to monthy usage, so that all the monthly data will appear in a <script> tag, 
+    # First navigates to monthly usage, so that all the monthly data will appear in a <script> tag,
     # which happens to be the last one in the document
-    _navigate_monthly()
+    _navigate_monthly(page)
 
-    # Now that the monthy usage has been selected, the data appears in the javascript.
-    # Selects this <script>, and parses out the data.
-    #        select returns a list, [0] gives the first and only element
-    #        .string gives the javascript contained in the <script> tag
-    script = browser.select('#page > script:last-of-type')[0].string 
-    #print(script)
+    # Now that the monthly usage has been selected, the data appears in the javascript.
+    # text_content() gives the javascript contained in the <script> tag
+    # (works on hidden elements like <script>, unlike inner_text())
+    script = page.locator('#page > script:last-of-type').text_content()
+    if DEBUG_MODE: print(script)
+
     #    The script has a lot of JSON in it, and the important data is contained in this JSON.
-    #    I could've imported the json library to parse it, but since I had already imported the regex library,
-    #    and since the JSON is not complex, I decided to use my own regular expressions.
-    pattern = re.compile(r"""\"(?P<MeterType>\w*?)\ Meter.*?   # (?P<Meter Type>...) is a named capture group
+    #    Since the JSON is not complex, regular expressions pull out the pieces needed.
+    pattern = re.compile(r"""\"(?P<MeterType>\w*?)\ Meter.*?   # (?P<MeterType>...) is a named capture group
                          categories\":\[(?P<Dates>.*?)\].*?  # .*? at the end takes care of stuff in between the text of interest
                          text\":\"(?P<Unit>.*?)\".*?
                          data\":\[(?P<Data>.*?)\]""", re.VERBOSE)
-    matches = pattern.finditer(script)
     meter_data = {}
-    for matchObj in matches:
+    for matchObj in pattern.finditer(script):
         meter_data[matchObj.group('MeterType')] = {'Unit': matchObj.group('Unit'),
                                                    'Data': matchObj.group('Data').split(','),
                                                    'Dates': matchObj.group('Dates').replace('"', '').split(',')}
     return meter_data
 
-def _navigate_monthly() -> None:
-    '''Navigates to monthy usage, causing all monthly data to appears in a <script> tag, 
-         which happens to be the last one in the document
-       This includes every meter's monthy data.'''
-    global browser
-    # There are multiple <a> tags (hyperlinks) with the string 'Monthly'. 
-    # Any of the ones with only the word 'Monthly' will work.
-    # find() returns the first one
-    monthlyNavLink = browser.find('a', string = re.compile(r'Monthly[^\S]*$')) # The word 'Monthly', not followed by any words before the end of the string
-    browser.follow_link(link=monthlyNavLink)
+
+def _navigate_monthly(page: Page) -> None:
+    '''Navigates to monthly usage, causing all monthly data to appear in a <script> tag,
+         which happens to be the last one in the document.
+       This includes every meter's monthly data.'''
+    # There are multiple <a> tags with the text 'Monthly'.
+    # Any of the ones ending in the word 'Monthly' will work; .first takes the first one.
+    monthly_link = page.locator('a').filter(has_text=re.compile(r'Monthly\s*$')).first
+    href = monthly_link.get_attribute('href')
+    page.goto(urljoin(page.url, href))
 
 
 # ==========================================================
@@ -140,31 +138,45 @@ def clean_format(meter_data, placeholder = '-'):
 
 # __________________________________________________________
 #                     Driver Code
-
-
 # ==========================================================
 # Getting the meter data from kmpud.com
 # ==========================================================
 
-#browser = RoboBrowser(history=True)
-browser = RoboBrowser(parser='html.parser') # parser='html5lib'
-browser.session.headers['User-Agent'] = 'Mozilla/5.0'
-browser.open('https://www.kmpud.com/login/')
+with sync_playwright() as p:
+    # headless=False shows the browser window, which helps while debugging
+    browser = p.chromium.launch(headless=not DEBUG_MODE)
+    page = browser.new_page()
+    page.goto(LOGIN_URL)
+
+    # Same form RoboBrowser found: the one whose action is the login URL
+    form = page.locator(f'form[action="{LOGIN_URL}"]')
+    if DEBUG_MODE: print('Log in HTML form: \n', form.evaluate('el => el.outerHTML'))
+
+    form.locator('input[name="log"]').fill(EMAIL)
+    form.locator('input[name="pwd"]').fill(PASSWORD)
+    form.locator('input[name="pwd"]').press('Enter')  # submits the form like a user would
+
+    # Wait until we've left the login page (times out if login fails)
+    page.wait_for_url(lambda url: '/login' not in url)
+ 
+    # Login cookies live in the browser context, so going straight to the URL stays logged in
+    page.goto(METER_URL)
+    
+    # Could use this to click on the element instead:
+    # page.locator(f'a[href="{METER_URL}"]').first.dispatch_event('click')
+    # page.wait_for_load_state()
+
+    # Scrape the meter data from the page.
+    meter_data = _get_meter_data(page)
+    # Some meter data may be missing so there will be a different number of data points for different meters.
+    # This finds the count for the meter with the least missing data.
+    count = max([len(meter_data[meter]["Data"]) for meter in meter_data])
+
+    browser.close()
 
 
-form = browser.get_form(action='https://www.kmpud.com/login/')
-if DEBUG_MODE: print('Log in HTML form: \n', form)                # <RoboForm log=, pwd=, rememberme=[], redirect_to=https://www.kmpud.com/wp-admin/, testcookie=1>
 
-form['log'].value = EMAIL
-form['pwd'].value = PASSWORD
-browser.submit_form(form)
-meterLink = browser.get_link(href='https://www.kmpud.com/my-account/meter-information/')
-browser.follow_link(link=meterLink)
-
-meter_data = _get_meter_data()
-# Some meter data may be missing so there will be a different number of data points for different meters.
-# This finds the count for the meter with the least missing data.
-count = max([len(meter_data[meter]["Data"]) for meter in meter_data])
+if DEBUG_MODE: print('Meter Data: \n', meter_data)
 
 # if DEBUG_MODE:
 #     with open('temp_save.txt', 'w') as file:
